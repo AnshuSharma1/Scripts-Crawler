@@ -1,7 +1,7 @@
 CREATE TABLE pratilipi_scripts
 (
     id              INT AUTO_INCREMENT,
-    title           VARCHAR(100),
+    title           TEXT,
     read_count      INT       DEFAULT 0,
     language        VARCHAR(50),
     rating          FLOAT     DEFAULT NULL,
