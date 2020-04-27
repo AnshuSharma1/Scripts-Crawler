@@ -1,0 +1,4 @@
+fake-useragent==0.1.11
+mysqlclient==1.4.6
+pandas==1.0.3
+requests==2.23.0

@@ -1,7 +1,9 @@
 from configparser import ConfigParser
 
 import MySQLdb
+import requests
 from MySQLdb.connections import OperationalError
+from fake_useragent import UserAgent
 
 
 def read_from_config(section):
@@ -29,3 +31,21 @@ def execute_query(query, retry=0):
             execute_query(query, retry + 1)
         else:
             raise err
+
+
+def get_request_headers(base_url):
+    user_agent = UserAgent()
+    response = requests.get(base_url)
+    words = list(response.headers['Set-Cookie'].split())
+    access_token = ''
+    for word in words:
+        if 'access_token' in word:
+            access_token = word.strip(';')
+            break
+
+    headers = {
+        'Cookie': access_token,
+        'User-Agent': str(user_agent.random)
+    }
+
+    return headers
