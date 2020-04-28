@@ -7,10 +7,10 @@ import requests
 
 from constants import AUTHORS_INSERT_QUERY, SCRIPTS_INSERT_QUERY, SCRIPTS_DATA_QUERY, POPULAR_URL, RECENT_URL, \
     TRENDING_URL, NAVIGATION_URL, AUTHOR_URL, AUTHOR_DETAILS_COLS, ARTICLE_DETAILS_COLS
-from helpers import execute_query, get_request_headers
+from helpers import get_database_connection, execute_query, get_request_headers
 
 TODAY = datetime.now()
-CURRENT_TIME = str(TODAY.date()) + '/' + str(TODAY.hour)
+CURRENT_TIME = str(TODAY.date()) + '_' + str(TODAY.hour)
 
 
 class PratilipiCrawler:
@@ -34,6 +34,7 @@ class PratilipiCrawler:
     base_url = 'https://hindi.pratilipi.com/'
 
     def __init__(self, language):
+        self.__db = get_database_connection()
         self.language = language
         self.headers = get_request_headers(self.base_url)
         self.latest_timestamp = self.get_latest_timestamp()
@@ -44,9 +45,11 @@ class PratilipiCrawler:
     def get_datetime(unix_timestamp):
         return datetime.fromtimestamp(unix_timestamp / 1000)
 
-    @staticmethod
-    def get_latest_timestamp():
-        cursor = execute_query("""SELECT MAX(site_updated_at) FROM pratilipi_scripts""")
+    def get_latest_timestamp(self):
+        cursor = execute_query(
+            """SELECT MAX(site_updated_at) FROM pratilipi_scripts""",
+            self.__db
+        )
         timestamp = cursor.fetchone()[0]
 
         return timestamp
@@ -54,7 +57,9 @@ class PratilipiCrawler:
     def get_categories(self):
         response = requests.get(self.base_url + NAVIGATION_URL,
                                 headers=self.headers).json()
-        categories = response['navigationList']['linkList']
+        categories = []
+        for category_type in response['navigationList']:
+            categories.extend(category_type['linkList'])
 
         return categories
 
@@ -81,16 +86,20 @@ class PratilipiCrawler:
 
         return article_params
 
-    @staticmethod
-    def get_existing_articles():
-        cursor = execute_query("""SELECT pratilipi_id FROM pratilipi_scripts""")
+    def get_existing_articles(self):
+        cursor = execute_query(
+            """SELECT pratilipi_id FROM pratilipi_scripts""",
+            self.__db
+        )
         article_ids = [tup[0] for tup in cursor.fetchall()]
 
         return article_ids
 
-    @staticmethod
-    def get_existing_authors():
-        cursor = execute_query("""SELECT pratilipi_id FROM pratilipi_authors""")
+    def get_existing_authors(self):
+        cursor = execute_query(
+            """SELECT pratilipi_id FROM pratilipi_authors""",
+            self.__db
+        )
         author_ids = [tup[0] for tup in cursor.fetchall()]
 
         return author_ids
@@ -161,7 +170,7 @@ class PratilipiCrawler:
 
         while response.status_code != 404:
             data = response.json()['pratilipi']
-            if not len(data['pratilipiList']):
+            if not len(data) or not len(data['pratilipiList']):
                 break
 
             for article in data['pratilipiList']:
@@ -190,14 +199,16 @@ class PratilipiCrawler:
                 author_ids.add(author_id)
 
         author_data = []
-        page_url = self.base_url + AUTHOR_URL
+        author_page_url = self.base_url + AUTHOR_URL
         for author_id in author_ids:
-            url = page_url.format(author_id=author_id)
+            url = author_page_url.format(author_id=author_id)
             response = requests.get(url, headers=self.headers)
             if response.status_code != 200:
                 continue
 
             response = response.json()
+            if response['displayName'] == '':
+                continue
             pratilipi_id = int(response['authorId'])
             author_name = response['fullName']
             author_name = author_name.replace("'", '"')
@@ -259,19 +270,24 @@ class PratilipiCrawler:
 
         return article_data
 
-    def save_articles_db(self):
-        if len(self.new_articles):
-            insert_data = list(map(str, self.new_articles))
-            insertion_string = ','.join(insert_data)
-            query = SCRIPTS_INSERT_QUERY.format(data=insertion_string)
-            execute_query(query)
+    def save_data_db(self, data_type, batch_size=1):
+        data = []
+        insertion_query = ''
+        if data_type == 'authors':
+            data = self.new_authors
+            insertion_query = AUTHORS_INSERT_QUERY
+        elif data_type == 'articles':
+            data = self.new_articles
+            insertion_query = SCRIPTS_INSERT_QUERY
 
-    def save_authors_db(self):
-        if len(self.new_authors):
-            insert_data = list(map(str, self.new_authors))
-            insertion_string = ','.join(insert_data)
-            query = AUTHORS_INSERT_QUERY.format(data=insertion_string)
-            execute_query(query)
+        if len(data):
+            insert_data = list(map(str, data))
+            batch_pos = 0
+            while batch_pos < len(insert_data):
+                insertion_string = ','.join(insert_data[batch_pos: batch_pos + batch_size])
+                query = insertion_query.format(data=insertion_string)
+                execute_query(query, self.__db)
+                batch_pos += batch_size
 
     @staticmethod
     def save_authors_csv(
@@ -290,7 +306,7 @@ class PratilipiCrawler:
             inplace=True
         )
 
-        filename = 'authors_{category)_{date}.csv'.format(
+        filename = 'authors_{category}_{date}.csv'.format(
             category=category_name, date=CURRENT_TIME
         )
         author_df.to_csv(filename)
@@ -308,13 +324,21 @@ class PratilipiCrawler:
         :param category_name: Category
         """
         articles_df = pd.DataFrame(articles, columns=ARTICLE_DETAILS_COLS)
+        articles_df['Updated_At'] = pd.to_datetime(articles_df['Updated_At'])
         time_sorted_articles = articles_df.sort_values('Updated_At', ascending=False)
-        mask = time_sorted_articles['Update_At'] > self.latest_timestamp
+
+        if self.latest_timestamp:
+            latest_time = self.latest_timestamp
+        else:
+            latest_time = min(articles_df['Updated_At'])
+
+        mask = time_sorted_articles['Updated_At'] >= latest_time
         recent_articles = time_sorted_articles[mask]
 
         if count > len(articles_df):
             cursor = execute_query(
-                SCRIPTS_DATA_QUERY.format(count=count)
+                SCRIPTS_DATA_QUERY.format(count=count),
+                self.__db
             )
             column_names = [i[0] for i in cursor.description]
             popular_articles = pd.DataFrame(cursor.fetchall(), columns=column_names)
@@ -323,11 +347,11 @@ class PratilipiCrawler:
             sorted_articles = articles_df.sort_values('Read_Count', ascending=False)
             popular_articles = sorted_articles.iloc[:count, :]
 
-        recent_filename = 'recent_{category)_{date}.csv'.format(
+        recent_filename = 'recent_{category}_{date}.csv'.format(
             category=category_name, date=CURRENT_TIME
         )
 
-        popular_filename = 'popular_{category)_{date}.csv'.format(
+        popular_filename = 'popular_{category}_{date}.csv'.format(
             category=category_name, date=CURRENT_TIME
         )
 
@@ -354,9 +378,11 @@ class PratilipiCrawler:
             self.save_authors_csv(authors_data, category_name)
             self.save_articles_csv(articles_data, len(articles_data), category_name)
 
-        self.save_authors_db()
-        self.save_articles_db()
+        self.save_data_db('authors')
+        self.save_data_db('articles')
+        self.__db.close()
 
 
 if __name__ == "__main__":
     crawler = PratilipiCrawler('HINDI')
+    crawler.process_categories()
