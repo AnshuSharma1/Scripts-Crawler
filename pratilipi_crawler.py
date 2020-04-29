@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import datetime
 from urllib.parse import urlencode
@@ -6,9 +7,10 @@ import pandas as pd
 import requests
 
 from constants import AUTHORS_INSERT_QUERY, SCRIPTS_INSERT_QUERY, SCRIPTS_DATA_QUERY, POPULAR_URL, RECENT_URL, \
-    TRENDING_URL, NAVIGATION_URL, AUTHOR_URL, AUTHOR_DETAILS_COLS, ARTICLE_DETAILS_COLS
+    TRENDING_URL, NAVIGATION_URL, AUTHOR_URL, DETAIL_PAGE_URL, AUTHOR_DETAILS_COLS, ARTICLE_DETAILS_COLS
 from helpers import get_database_connection, execute_query, get_request_headers
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TODAY = datetime.now()
 CURRENT_TIME = str(TODAY.date()) + '_' + str(TODAY.hour)
 
@@ -236,6 +238,23 @@ class PratilipiCrawler:
 
         return author_data
 
+    def get_article_tags(self, article):
+        tags = []
+        url = self.base_url + DETAIL_PAGE_URL
+        if 'tags' in article.keys():
+            for tag in article['tags']:
+                tags.append(tag['nameEn'])
+        else:
+            slug = article['slug'].split('/')[-1]
+            detail_page = requests.get(url.format(slug=slug), headers=self.headers)
+            if detail_page.status_code == 200:
+                response = detail_page.json()
+                if 'tags' in response.keys():
+                    tags = [tag['nameEn'] for tag in response['tags']]
+
+        tags = list(filter(None.__ne__, tags))
+        return tags
+
     def process_articles(self, articles):
         """
         :returns: Category wise new articles (List of tuples)
@@ -254,10 +273,16 @@ class PratilipiCrawler:
             pratilipi_id = article['pratilipiId']
             page_url = article['pageUrl']
             site_updated_at = self.get_datetime(article['lastUpdatedDateMillis'])
+            tags = self.get_article_tags(article)
+            author_name = article['author']['displayName']
+            read_time = article['readingTime']
 
             data = (
                 title,
                 read_count,
+                read_time,
+                ','.join(tags),
+                author_name,
                 language,
                 rating,
                 author_id,
@@ -299,17 +324,21 @@ class PratilipiCrawler:
         :param authors: Authors list
         :param category_name: Category
         """
+        if not len(authors):
+            return
+
         author_df = pd.DataFrame(authors, columns=AUTHOR_DETAILS_COLS)
         author_df.sort_values(
             'Follow_Count',
             ascending=False,
-            inplace=True
+            inplace=True,
+            ignore_index=True
         )
 
         filename = 'authors_{category}_{date}.csv'.format(
             category=category_name, date=CURRENT_TIME
         )
-        author_df.to_csv(filename)
+        author_df.to_csv(os.path.join(str(category_name), filename))
 
     def save_articles_csv(
             self,
@@ -323,9 +352,16 @@ class PratilipiCrawler:
         :param count: Count of Popular Articles
         :param category_name: Category
         """
+        if not len(articles):
+            return
+
         articles_df = pd.DataFrame(articles, columns=ARTICLE_DETAILS_COLS)
         articles_df['Updated_At'] = pd.to_datetime(articles_df['Updated_At'])
-        time_sorted_articles = articles_df.sort_values('Updated_At', ascending=False)
+        time_sorted_articles = articles_df.sort_values(
+            'Updated_At',
+            ascending=False,
+            ignore_index=True
+        )
 
         if self.latest_timestamp:
             latest_time = self.latest_timestamp
@@ -344,7 +380,11 @@ class PratilipiCrawler:
             popular_articles = pd.DataFrame(cursor.fetchall(), columns=column_names)
             popular_articles = popular_articles.drop(['id', 'created_at'], 1)
         else:
-            sorted_articles = articles_df.sort_values('Read_Count', ascending=False)
+            sorted_articles = articles_df.sort_values(
+                'Read_Count',
+                ascending=False,
+                ignore_index=True
+            )
             popular_articles = sorted_articles.iloc[:count, :]
 
         recent_filename = 'recent_{category}_{date}.csv'.format(
@@ -355,8 +395,14 @@ class PratilipiCrawler:
             category=category_name, date=CURRENT_TIME
         )
 
-        recent_articles.to_csv(recent_filename)
-        popular_articles.to_csv(popular_filename)
+        recent_articles.to_csv(os.path.join(str(category_name), recent_filename))
+        popular_articles.to_csv(os.path.join(str(category_name), popular_filename))
+
+    @staticmethod
+    def ensure_dir(category):
+        dir_path = os.path.join(BASE_DIR, '{cat}'.format(cat=category))
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
 
     def process_categories(self):
         """
@@ -375,6 +421,7 @@ class PratilipiCrawler:
             authors_data = self.process_authors(all_articles)
             articles_data = self.process_articles(all_articles)
 
+            self.ensure_dir(category_name)
             self.save_authors_csv(authors_data, category_name)
             self.save_articles_csv(articles_data, len(articles_data), category_name)
 

@@ -16,8 +16,10 @@ NAVIGATION_URL = 'api/navigation/list?language=HINDI'
 
 AUTHOR_URL = 'api/authors/v1.0?authorId={author_id}'
 
+DETAIL_PAGE_URL = 'api/pratilipis?slug={slug}'
+
 AUTHOR_DETAILS_COLS = ['Author_Name', 'Follow_Count', 'Read_Count', 'Language', 'Gender',
                        'Pratilipi_Id', 'Page_Url', 'Registration_Date']
 
-ARTICLE_DETAILS_COLS = ['Title', 'Read_Count', 'Language', 'Rating', 'Author_Id',
+ARTICLE_DETAILS_COLS = ['Title', 'Read_Count', 'Read_Time', 'Tags', 'Author_Name', 'Language', 'Rating', 'Author_Id',
                         'Pratilipi_Id', 'Page_Url', 'Updated_At']
