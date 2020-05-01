@@ -6,8 +6,9 @@ from urllib.parse import urlencode
 import pandas as pd
 import requests
 
-from constants import AUTHORS_INSERT_QUERY, SCRIPTS_INSERT_QUERY, SCRIPTS_DATA_QUERY, POPULAR_URL, RECENT_URL, \
-    TRENDING_URL, NAVIGATION_URL, AUTHOR_URL, DETAIL_PAGE_URL, AUTHOR_DETAILS_COLS, ARTICLE_DETAILS_COLS
+from constants import AUTHORS_INSERT_QUERY, SCRIPTS_INSERT_QUERY, CATEGORY_INSERT_QUERY, \
+    POPULAR_URL, RECENT_URL, TRENDING_URL, NAVIGATION_URL, AUTHOR_URL, DETAIL_PAGE_URL, AUTHOR_DETAILS_COLS, \
+    ARTICLE_DETAILS_COLS
 from helpers import get_database_connection, execute_query, get_request_headers
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,8 +32,6 @@ class PratilipiCrawler:
 
     """
     unique_ids = set()
-    new_articles = set()
-    new_authors = set()
     base_url = 'https://hindi.pratilipi.com/'
 
     def __init__(self, language):
@@ -121,7 +120,8 @@ class PratilipiCrawler:
         """
         articles = []
         timestamp = datetime.min
-        params = self.get_article_params(category)
+        category_url = category['url'].strip('/')
+        params = self.get_article_params(category_url)
         if recent and self.latest_timestamp:
             timestamp = self.latest_timestamp
 
@@ -140,7 +140,7 @@ class PratilipiCrawler:
                         self.unique_ids.add(article['pratilipiId'])
                         articles.append(article)
                 else:
-                    return articles
+                    return self.process_articles(category, articles)
 
             # Offset pagination
             params.update({
@@ -154,7 +154,7 @@ class PratilipiCrawler:
                 time.sleep(3)
                 response = requests.get(url + urlencode(params), headers=self.headers)
 
-        return articles
+        return self.process_articles(category, articles)
 
     def get_trending_articles(
             self,
@@ -164,7 +164,8 @@ class PratilipiCrawler:
         """
         :returns: Category wise trending articles (List of JSON)
         """
-        params = self.get_article_params(category, True)
+        category_url = category['url'].strip('/')
+        params = self.get_article_params(category_url, True)
         url = self.base_url + page_url
         first_url = url + urlencode(params)
         response = requests.get(first_url, headers=self.headers)
@@ -188,7 +189,7 @@ class PratilipiCrawler:
             next_url = url + urlencode(params)
             response = requests.get(next_url, headers=self.headers)
 
-        return articles
+        return self.process_articles(category, articles)
 
     def process_authors(self, articles):
         """
@@ -196,11 +197,11 @@ class PratilipiCrawler:
         """
         author_ids = set()
         for article in articles:
-            author_id = article['author']['authorId']
+            author_id = article[8]
             if author_id not in author_ids.union(self.existing_authors):
                 author_ids.add(author_id)
 
-        author_data = []
+        authors = set()
         author_page_url = self.base_url + AUTHOR_URL
         for author_id in author_ids:
             url = author_page_url.format(author_id=author_id)
@@ -211,17 +212,21 @@ class PratilipiCrawler:
             response = response.json()
             if response['displayName'] == '':
                 continue
-            pratilipi_id = int(response['authorId'])
-            author_name = response['fullName']
-            author_name = author_name.replace("'", '"')
-            follow_count = int(response['followCount'])
-            read_count = int(response['totalReadCount'])
-            language = response['language']
-            gender = response['gender']
-            page_url = response['pageUrl']
-            site_registration_date = self.get_datetime(
-                response['registrationDateMillis']
-            )
+
+            try:
+                pratilipi_id = int(response['authorId'])
+                author_name = response['fullName']
+                author_name = author_name.replace("'", '"')
+                follow_count = int(response['followCount'])
+                read_count = int(response['totalReadCount'])
+                language = response['language']
+                gender = response['gender']
+                page_url = response['pageUrl']
+                site_registration_date = self.get_datetime(
+                    response['registrationDateMillis']
+                )
+            except KeyError:
+                continue
 
             data = (
                 author_name,
@@ -233,10 +238,9 @@ class PratilipiCrawler:
                 page_url,
                 str(site_registration_date)
             )
-            author_data.append(data)
-            self.new_authors.add(data)
+            authors.add(data)
 
-        return author_data
+        return authors
 
     def get_article_tags(self, article):
         tags = []
@@ -255,32 +259,57 @@ class PratilipiCrawler:
         tags = list(filter(None.__ne__, tags))
         return tags
 
-    def process_articles(self, articles):
+    def get_reading_time(self, article):
+        read_time = 0
+        key = 'readingTime'
+        url = self.base_url + DETAIL_PAGE_URL
+        if key in article.keys():
+            read_time = article[key]
+        else:
+            slug = article['slug'].split('/')[-1]
+            detail_page = requests.get(url.format(slug=slug), headers=self.headers)
+            if detail_page.status_code == 200:
+                response = detail_page.json()
+                if key in response.keys():
+                    read_time = response[key]
+
+        return read_time
+
+    def process_articles(self, category, articles):
         """
         :returns: Category wise new articles (List of tuples)
         """
+        category_name = category['categoryName']
         article_data = []
         for article in articles:
             pratilipi_id = article['pratilipiId']
             if pratilipi_id in self.existing_articles:
                 continue
 
-            author_id = article['author']['authorId']
-            title = article['displayTitle']
-            read_count = article['readCount']
-            language = article['language']
-            rating = article['averageRating']
-            pratilipi_id = article['pratilipiId']
-            page_url = article['pageUrl']
-            site_updated_at = self.get_datetime(article['lastUpdatedDateMillis'])
-            tags = self.get_article_tags(article)
-            author_name = article['author']['displayName']
-            read_time = article['readingTime']
+            try:
+                author_details = article['author']
+                author_id = author_details['authorId']
+                title = article['displayTitle'].replace("'", '"')
+                read_time = self.get_reading_time(article)
+                read_count = article['readCount']
+                language = article['language']
+                rating = article['averageRating']
+                pratilipi_id = article['pratilipiId']
+                page_url = article['pageUrl']
+                site_updated_at = self.get_datetime(article['lastUpdatedDateMillis'])
+                tags = self.get_article_tags(article)
+                if 'displayName' in author_details:
+                    author_name = author_details['displayName'].replace("'", '"')
+                else:
+                    author_name = ''
+            except KeyError:
+                continue
 
             data = (
                 title,
                 read_count,
                 read_time,
+                category_name,
                 ','.join(tags),
                 author_name,
                 language,
@@ -291,38 +320,28 @@ class PratilipiCrawler:
                 str(site_updated_at)
             )
             article_data.append(data)
-            self.new_articles.add(data)
 
         return article_data
 
-    def save_data_db(self, data_type, batch_size=1):
-        data = []
-        insertion_query = ''
-        if data_type == 'authors':
-            data = self.new_authors
-            insertion_query = AUTHORS_INSERT_QUERY
-        elif data_type == 'articles':
-            data = self.new_articles
-            insertion_query = SCRIPTS_INSERT_QUERY
+    def save_data_db(self, data, insertion_query, batch_size=1):
+        if not len(data):
+            return
 
-        if len(data):
-            insert_data = list(map(str, data))
-            batch_pos = 0
-            while batch_pos < len(insert_data):
-                insertion_string = ','.join(insert_data[batch_pos: batch_pos + batch_size])
-                query = insertion_query.format(data=insertion_string)
-                execute_query(query, self.__db)
-                batch_pos += batch_size
+        insert_data = list(map(str, data))
+        batch_pos = 0
+        while batch_pos < len(insert_data):
+            insertion_string = ','.join(insert_data[batch_pos: batch_pos + batch_size])
+            query = insertion_query.format(data=insertion_string)
+            execute_query(query, self.__db)
+            batch_pos += batch_size
 
     @staticmethod
     def save_authors_csv(
-            authors,
-            category_name
+            authors
     ):
         """
         Store authors to csv
         :param authors: Authors list
-        :param category_name: Category
         """
         if not len(authors):
             return
@@ -335,98 +354,100 @@ class PratilipiCrawler:
             ignore_index=True
         )
 
-        filename = 'authors_{category}_{date}.csv'.format(
-            category=category_name, date=CURRENT_TIME
-        )
-        author_df.to_csv(os.path.join(str(category_name), filename))
+        filename = 'authors_{date}.csv'.format(date=CURRENT_TIME)
+        author_df.to_csv(filename)
 
     def save_articles_csv(
             self,
             articles,
-            count,
-            category_name
+            count
     ):
         """
         Save articles to CSV
         :param articles: Articles List
         :param count: Count of Popular Articles
-        :param category_name: Category
         """
         if not len(articles):
-            return
+            return []
 
-        articles_df = pd.DataFrame(articles, columns=ARTICLE_DETAILS_COLS)
+        articles_df = pd.DataFrame(articles, columns=ARTICLE_DETAILS_COLS).drop_duplicates()
         articles_df['Updated_At'] = pd.to_datetime(articles_df['Updated_At'])
-        time_sorted_articles = articles_df.sort_values(
-            'Updated_At',
-            ascending=False,
-            ignore_index=True
-        )
-
         if self.latest_timestamp:
             latest_time = self.latest_timestamp
         else:
             latest_time = min(articles_df['Updated_At'])
 
+        time_sorted_articles = articles_df.sort_values(
+            'Updated_At',
+            ascending=False,
+            ignore_index=True
+        )
         mask = time_sorted_articles['Updated_At'] >= latest_time
         recent_articles = time_sorted_articles[mask]
 
-        if count > len(articles_df):
-            cursor = execute_query(
-                SCRIPTS_DATA_QUERY.format(count=count),
-                self.__db
-            )
-            column_names = [i[0] for i in cursor.description]
-            popular_articles = pd.DataFrame(cursor.fetchall(), columns=column_names)
-            popular_articles = popular_articles.drop(['id', 'created_at'], 1)
-        else:
-            sorted_articles = articles_df.sort_values(
-                'Read_Count',
-                ascending=False,
-                ignore_index=True
-            )
-            popular_articles = sorted_articles.iloc[:count, :]
-
-        recent_filename = 'recent_{category}_{date}.csv'.format(
-            category=category_name, date=CURRENT_TIME
+        read_sorted_articles = articles_df.sort_values(
+            'Read_Count',
+            ascending=False,
+            ignore_index=True
         )
+        popular_articles = read_sorted_articles.iloc[:count, :]
 
-        popular_filename = 'popular_{category}_{date}.csv'.format(
-            category=category_name, date=CURRENT_TIME
-        )
-
-        recent_articles.to_csv(os.path.join(str(category_name), recent_filename))
-        popular_articles.to_csv(os.path.join(str(category_name), popular_filename))
+        recent_filename = 'recent_{date}.csv'.format(date=CURRENT_TIME)
+        popular_filename = 'popular_{date}.csv'.format(date=CURRENT_TIME)
+        recent_articles.to_csv(recent_filename)
+        popular_articles.to_csv(popular_filename)
 
     @staticmethod
-    def ensure_dir(category):
-        dir_path = os.path.join(BASE_DIR, '{cat}'.format(cat=category))
-        if not os.path.exists(dir_path):
-            os.makedirs(dir_path)
+    def get_articles_df(articles):
+        frame = pd.DataFrame(articles, columns=ARTICLE_DETAILS_COLS)
+        frame.drop_duplicates(inplace=True)
+        frame['Updated_At'] = pd.to_datetime(frame['Updated_At'])
+
+        return frame
+
+    def get_genre_data(self, articles):
+        if not len(articles):
+            return []
+
+        genre_query = """
+        SELECT pratilipi_id, category FROM pratilipi_categories WHERE pratilipi_id in ({ids})
+        """
+        genre = articles[['Pratilipi_Id', 'Genre']].drop_duplicates()
+        ids = ','.join(map(str, genre['Pratilipi_Id'].unique()))
+        cursor = execute_query(genre_query.format(ids=ids), self.__db)
+        existing_data = pd.DataFrame(cursor.fetchall(), columns=genre.columns)
+        id_mask = (genre['Pratilipi_Id'].isin(existing_data['Pratilipi_Id']))
+        genre_mask = (genre['Genre'].isin(existing_data['Genre']))
+        new_data = genre[~(id_mask & genre_mask)]
+
+        return list(map(tuple, new_data.values))
 
     def process_categories(self):
         """
         Process category wise data, get articles and authors -> store in CSV, database
         """
         categories = self.get_categories()
+        all_data = []
         for category in categories:
             self.unique_ids = set()
-            category_name = category['categoryName']
-            category_url = category['url'].strip('/')
-            popular_articles = self.get_sorted_articles(category_url, POPULAR_URL)
-            recent_articles = self.get_sorted_articles(category_url, RECENT_URL, recent=True)
-            trending_articles = self.get_trending_articles(category_url, TRENDING_URL)
-            all_articles = popular_articles + recent_articles + trending_articles
+            recent_articles = self.get_sorted_articles(category, RECENT_URL, recent=True)
+            popular_articles = self.get_sorted_articles(category, POPULAR_URL)
+            trending_articles = self.get_trending_articles(category, TRENDING_URL)
+            all_articles = recent_articles + popular_articles + trending_articles
+            all_data.extend(all_articles)
 
-            authors_data = self.process_authors(all_articles)
-            articles_data = self.process_articles(all_articles)
+        authors_data = self.process_authors(all_data)
+        articles_df = self.get_articles_df(all_data)
+        article_db_data = articles_df.drop(['Genre', 'Author_Name'], 1)
+        article_db_data = article_db_data.drop_duplicates(subset=['Pratilipi_Id']).values
+        article_db_data = list(map(tuple, article_db_data))
+        genre_data = self.get_genre_data(articles_df)
 
-            self.ensure_dir(category_name)
-            self.save_authors_csv(authors_data, category_name)
-            self.save_articles_csv(articles_data, len(articles_data), category_name)
-
-        self.save_data_db('authors')
-        self.save_data_db('articles')
+        self.save_authors_csv(authors_data)
+        self.save_articles_csv(articles_df, len(articles_df))
+        self.save_data_db(authors_data, AUTHORS_INSERT_QUERY)
+        self.save_data_db(article_db_data, SCRIPTS_INSERT_QUERY)
+        self.save_data_db(genre_data, CATEGORY_INSERT_QUERY)
         self.__db.close()
 
 
