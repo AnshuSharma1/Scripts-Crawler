@@ -21,8 +21,6 @@ class PratilipiCrawler:
     Crawler to fetch new articles and authors on 'Pratilipi' website
 
     unique_ids: Category wise stores unique article data
-    new_articles: New articles in all categories
-    new_authors: New authors in all categories
     base_url: Main URL of website
     language: language
     headers: Request headers
@@ -359,13 +357,11 @@ class PratilipiCrawler:
 
     def save_articles_csv(
             self,
-            articles,
-            count
+            articles
     ):
         """
         Save articles to CSV
         :param articles: Articles List
-        :param count: Count of Popular Articles
         """
         if not len(articles):
             return []
@@ -384,13 +380,11 @@ class PratilipiCrawler:
         )
         mask = time_sorted_articles['Updated_At'] >= latest_time
         recent_articles = time_sorted_articles[mask]
-
-        read_sorted_articles = articles_df.sort_values(
+        popular_articles = articles_df.sort_values(
             'Read_Count',
             ascending=False,
             ignore_index=True
         )
-        popular_articles = read_sorted_articles.iloc[:count, :]
 
         recent_filename = 'recent_{date}.csv'.format(date=CURRENT_TIME)
         popular_filename = 'popular_{date}.csv'.format(date=CURRENT_TIME)
@@ -439,12 +433,14 @@ class PratilipiCrawler:
         authors_data = self.process_authors(all_data)
         articles_df = self.get_articles_df(all_data)
         article_db_data = articles_df.drop(['Genre', 'Author_Name'], 1)
-        article_db_data = article_db_data.drop_duplicates(subset=['Pratilipi_Id']).values
+        article_db_data = article_db_data.drop_duplicates(
+            subset=['Pratilipi_Id']
+        ).values
         article_db_data = list(map(tuple, article_db_data))
         genre_data = self.get_genre_data(articles_df)
 
         self.save_authors_csv(authors_data)
-        self.save_articles_csv(articles_df, len(articles_df))
+        self.save_articles_csv(articles_df)
         self.save_data_db(authors_data, AUTHORS_INSERT_QUERY)
         self.save_data_db(article_db_data, SCRIPTS_INSERT_QUERY)
         self.save_data_db(genre_data, CATEGORY_INSERT_QUERY)
